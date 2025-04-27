@@ -248,14 +248,23 @@ class TerminalPopupMenu(object):
             menu.append(item)
 
             menu.append(Gtk.SeparatorMenuItem())
-
-        if self.config['show_titlebar'] == False:
-            item = Gtk.MenuItem.new_with_mnemonic(_('Grouping'))
-            submenu = self.terminal.populate_group_menu()
-            submenu.show_all()
-            item.set_submenu(submenu)
-            menu.append(item)
-            menu.append(Gtk.SeparatorMenuItem())
+            
+        # Всегда добавляем меню группировки, независимо от настройки show_titlebar
+        item = Gtk.MenuItem.new_with_mnemonic(_('Grouping'))
+        submenu = self.terminal.populate_group_menu()
+        submenu.show_all()
+        item.set_submenu(submenu)
+        menu.append(item)
+        menu.append(Gtk.SeparatorMenuItem())
+            
+        # Старая проверка настройки show_titlebar больше не нужна
+        # if self.config['show_titlebar'] == False:
+        #    item = Gtk.MenuItem.new_with_mnemonic(_('Grouping'))
+        #    submenu = self.terminal.populate_group_menu()
+        #    submenu.show_all()
+        #    item.set_submenu(submenu)
+        #    menu.append(item)
+        #    menu.append(Gtk.SeparatorMenuItem())
 
         if terminal.is_held_open:
             item = Gtk.MenuItem.new_with_mnemonic(_('Relaunch Command'))
