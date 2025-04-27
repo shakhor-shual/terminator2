@@ -25,16 +25,13 @@ AVAILABLE = ['MQTTLogger']
 class MQTTLogger(plugin.MenuItem):
     """ Add MQTT integration to the terminal menu """
     capabilities = ['terminal_menu']
-    loggers = None
-    receivers = None
+    mqtt_connections = None
     vte_version = Vte.get_minor_version()
 
     def __init__(self):
         plugin.MenuItem.__init__(self)
-        if not self.loggers:
-            self.loggers = {}
-        if not self.receivers:
-            self.receivers = {}
+        if not self.mqtt_connections:
+            self.mqtt_connections = {}
 
     def callback(self, menuitems, menu, terminal):
         """ Add menu items to the terminal menu """
@@ -44,42 +41,23 @@ class MQTTLogger(plugin.MenuItem):
             menuitems.append(item)
             return
 
-        submenu = Gtk.Menu()
-        
         vte_terminal = terminal.get_vte()
         
-        # Add menu item for sending terminal output to MQTT
-        if vte_terminal not in self.loggers:
-            item = Gtk.MenuItem.new_with_mnemonic(_('Start MQTT Publisher'))
-            item.connect("activate", self.start_mqtt_publisher, terminal)
+        # Add menu items for MQTT connection management
+        if vte_terminal not in self.mqtt_connections:
+            item = Gtk.MenuItem.new_with_mnemonic(_('Configure MQTT Connection'))
+            item.connect("activate", self.configure_mqtt, terminal)
         else:
-            item = Gtk.MenuItem.new_with_mnemonic(_('Stop MQTT Publisher'))
-            item.connect("activate", self.stop_mqtt_publisher, terminal)
+            item = Gtk.MenuItem.new_with_mnemonic(_('Disconnect MQTT'))
+            item.connect("activate", self.stop_mqtt, terminal)
             item.set_has_tooltip(True)
-            item.set_tooltip_text(f"Publishing to {self.loggers[vte_terminal]['mqtt_topic']} on {self.loggers[vte_terminal]['broker']}")
+            conn_info = self.mqtt_connections[vte_terminal]
+            tooltip = f"Connected to {conn_info['broker']}:{conn_info['port']}\n"
+            tooltip += f"Publishing to: {conn_info['pub_topic']}\n"
+            tooltip += f"Subscribed to: {conn_info['sub_topic']}"
+            item.set_tooltip_text(tooltip)
         
-        submenu.append(item)
-        
-        # Add separator
-        separator = Gtk.SeparatorMenuItem()
-        submenu.append(separator)
-        
-        # Add menu item for receiving MQTT messages
-        if vte_terminal not in self.receivers:
-            item = Gtk.MenuItem.new_with_mnemonic(_('Start MQTT Subscriber'))
-            item.connect("activate", self.start_mqtt_subscriber, terminal)
-        else:
-            item = Gtk.MenuItem.new_with_mnemonic(_('Stop MQTT Subscriber'))
-            item.connect("activate", self.stop_mqtt_subscriber, terminal)
-            item.set_has_tooltip(True)
-            item.set_tooltip_text(f"Subscribed to {self.receivers[vte_terminal]['mqtt_topic']} on {self.receivers[vte_terminal]['broker']}")
-        
-        submenu.append(item)
-        
-        # Create a main menu item to hold the submenu
-        main_item = Gtk.MenuItem.new_with_mnemonic(_('_MQTT'))
-        main_item.set_submenu(submenu)
-        menuitems.append(main_item)
+        menuitems.append(item)
         
     def extract_content(self, terminal, row_start, col_start, row_end, col_end):
         """ Extract text content from terminal """
@@ -94,73 +72,81 @@ class MQTTLogger(plugin.MenuItem):
         """ MQTT publish callback when terminal content changes """
         try:
             # Only continue if we're connected
-            if not self.loggers[terminal]["mqtt_client"].is_connected():
+            if not self.mqtt_connections[terminal]["mqtt_client"].is_connected():
                 return
                 
-            last_saved_col = self.loggers[terminal]["col"]
-            last_saved_row = self.loggers[terminal]["row"]
+            last_saved_col = self.mqtt_connections[terminal]["col"]
+            last_saved_row = self.mqtt_connections[terminal]["row"]
             (col, row) = terminal.get_cursor_position()
             
             # Only send data when there's enough new content
-            if row - last_saved_row < 1:  # Changed from terminal.get_row_count() for more frequent updates
+            if row - last_saved_row < 1:  # Changed for more frequent updates
                 return
                 
             content = self.extract_content(terminal, last_saved_row, last_saved_col, row, col)
             if content:
                 # Don't send the last char (usually '\n')
-                self.loggers[terminal]["mqtt_client"].publish(
-                    self.loggers[terminal]["mqtt_topic"],
+                self.mqtt_connections[terminal]["mqtt_client"].publish(
+                    self.mqtt_connections[terminal]["pub_topic"],
                     content[:-1]
                 )
                 
-            self.loggers[terminal]["col"] = col
-            self.loggers[terminal]["row"] = row
+            self.mqtt_connections[terminal]["col"] = col
+            self.mqtt_connections[terminal]["row"] = row
         except Exception as e:
             sys.stderr.write(f"MQTT Publisher error: {str(e)}\n")
 
-    def start_mqtt_publisher(self, _widget, terminal):
-        """ Start publishing terminal content to MQTT """
-        dialog = MQTTConfigDialog(_widget.get_toplevel(), _("MQTT Publisher Configuration"), True)
+    def configure_mqtt(self, _widget, terminal):
+        """ Start MQTT connection setup """
+        dialog = MQTTConfigDialog(_widget.get_toplevel(), _("MQTT Configuration"))
         response = dialog.run()
         
         if response == Gtk.ResponseType.OK:
             try:
                 broker = dialog.get_broker()
                 port = dialog.get_port()
-                topic = dialog.get_topic()
+                pub_topic = dialog.get_pub_topic()
+                sub_topic = dialog.get_sub_topic()
                 username = dialog.get_username()
                 password = dialog.get_password()
                 
                 # Create MQTT client
-                client_id = f"terminator-{os.getpid()}-publisher"
-                mqtt_client = mqtt.Client(client_id=client_id)
+                client_id = f"terminator-{os.getpid()}-{terminal.uuid}"
+                mqtt_client = mqtt.Client(client_id=client_id, userdata={'terminal': terminal})
                 
                 # Set credentials if provided
                 if username:
                     mqtt_client.username_pw_set(username, password)
                 
+                # Set up callbacks
+                mqtt_client.on_message = self.on_mqtt_message
+                
                 # Connect to broker
                 mqtt_client.connect(broker, port)
+                
+                # Subscribe to topic for receiving commands
+                mqtt_client.subscribe(sub_topic)
                 mqtt_client.loop_start()
                 
                 # Store connection info
                 vte_terminal = terminal.get_vte()
                 (col, row) = vte_terminal.get_cursor_position()
                 
-                self.loggers[vte_terminal] = {
+                self.mqtt_connections[vte_terminal] = {
                     "mqtt_client": mqtt_client,
                     "broker": broker,
                     "port": port,
-                    "mqtt_topic": topic,
+                    "pub_topic": pub_topic,
+                    "sub_topic": sub_topic,
                     "col": col,
                     "row": row,
                     "handler_id": 0
                 }
                 
-                # Connect the contents-changed signal
+                # Connect the contents-changed signal for publishing
                 handler_id = vte_terminal.connect('contents-changed', 
-                                                lambda vte: self.mqtt_publish(vte))
-                self.loggers[vte_terminal]["handler_id"] = handler_id
+                                               lambda vte: self.mqtt_publish(vte))
+                self.mqtt_connections[vte_terminal]["handler_id"] = handler_id
                 
             except Exception as e:
                 error = Gtk.MessageDialog(None, Gtk.DialogFlags.MODAL, 
@@ -173,19 +159,19 @@ class MQTTLogger(plugin.MenuItem):
                 
         dialog.destroy()
 
-    def stop_mqtt_publisher(self, _widget, terminal):
-        """ Stop publishing terminal content to MQTT """
+    def stop_mqtt(self, _widget, terminal):
+        """ Stop MQTT connection """
         vte_terminal = terminal.get_vte()
-        if vte_terminal in self.loggers:
+        if vte_terminal in self.mqtt_connections:
             # Disconnect signal
-            vte_terminal.disconnect(self.loggers[vte_terminal]["handler_id"])
+            vte_terminal.disconnect(self.mqtt_connections[vte_terminal]["handler_id"])
             
             # Stop MQTT client
-            self.loggers[vte_terminal]["mqtt_client"].loop_stop()
-            self.loggers[vte_terminal]["mqtt_client"].disconnect()
+            self.mqtt_connections[vte_terminal]["mqtt_client"].loop_stop()
+            self.mqtt_connections[vte_terminal]["mqtt_client"].disconnect()
             
-            # Remove from loggers dict
-            del self.loggers[vte_terminal]
+            # Remove from connections dict
+            del self.mqtt_connections[vte_terminal]
 
     def on_mqtt_message(self, client, userdata, msg):
         """ Callback for received MQTT messages """
@@ -202,12 +188,11 @@ class MQTTLogger(plugin.MenuItem):
                 else:
                     payload = str(msg.payload)
                     
-                # Не добавляем лишний перевод строки, если только явно не запрошено
-                # Оставляем команду как есть, чтобы не было двойных Enter
-                # Проверяем, заканчивается ли сообщение переводом строки
-                if not payload.endswith('\r\n') and not payload.endswith('\n'):
-                    # Только если нет перевода строки, добавляем его
-                    payload += '\r\n'
+                # Совершенно удаляем любые завершающие переводы строки из входящего сообщения
+                payload = payload.rstrip('\r\n')
+                
+                # А теперь добавляем ОДИН перевод строки для выполнения команды
+                payload += '\n'
                 
                 # Используем feed_child на объекте VTE терминала для эмуляции ввода клавиатуры
                 vte_terminal = terminal.get_vte()
@@ -220,79 +205,18 @@ class MQTTLogger(plugin.MenuItem):
         # Schedule the GUI update in the main thread
         GLib.idle_add(feed_to_terminal)
 
-    def start_mqtt_subscriber(self, _widget, terminal):
-        """ Start subscribing to MQTT topic """
-        dialog = MQTTConfigDialog(_widget.get_toplevel(), _("MQTT Subscriber Configuration"), False)
-        response = dialog.run()
-        
-        if response == Gtk.ResponseType.OK:
-            try:
-                broker = dialog.get_broker()
-                port = dialog.get_port()
-                topic = dialog.get_topic()
-                username = dialog.get_username()
-                password = dialog.get_password()
-                
-                # Create MQTT client
-                client_id = f"terminator-{os.getpid()}-subscriber"
-                mqtt_client = mqtt.Client(client_id=client_id, userdata={'terminal': terminal})
-                
-                # Set credentials if provided
-                if username:
-                    mqtt_client.username_pw_set(username, password)
-                
-                # Set up callbacks
-                mqtt_client.on_message = self.on_mqtt_message
-                
-                # Connect to broker
-                mqtt_client.connect(broker, port)
-                
-                # Subscribe to topic
-                mqtt_client.subscribe(topic)
-                mqtt_client.loop_start()
-                
-                vte_terminal = terminal.get_vte()
-                self.receivers[vte_terminal] = {
-                    "mqtt_client": mqtt_client,
-                    "broker": broker,
-                    "port": port,
-                    "mqtt_topic": topic
-                }
-                
-            except Exception as e:
-                error = Gtk.MessageDialog(None, Gtk.DialogFlags.MODAL, 
-                                         Gtk.MessageType.ERROR,
-                                         Gtk.ButtonsType.OK, 
-                                         f"Error connecting to MQTT broker: {str(e)}")
-                error.set_transient_for(dialog)
-                error.run()
-                error.destroy()
-                
-        dialog.destroy()
-
-    def stop_mqtt_subscriber(self, _widget, terminal):
-        """ Stop subscribing to MQTT topic """
-        vte_terminal = terminal.get_vte()
-        if vte_terminal in self.receivers:
-            # Stop MQTT client
-            self.receivers[vte_terminal]["mqtt_client"].loop_stop()
-            self.receivers[vte_terminal]["mqtt_client"].disconnect()
-            
-            # Remove from receivers dict
-            del self.receivers[vte_terminal]
-
 
 class MQTTConfigDialog(Gtk.Dialog):
     """ Dialog for configuring MQTT connection """
     
-    def __init__(self, parent, title, is_publisher=True):
+    def __init__(self, parent, title):
         buttons = (
             _("_Cancel"), Gtk.ResponseType.CANCEL,
             _("_Connect"), Gtk.ResponseType.OK
         )
         
         Gtk.Dialog.__init__(self, title=title, transient_for=parent, flags=0, buttons=buttons)
-        self.set_default_size(400, 250)
+        self.set_default_size(500, 350)
         self.set_border_width(10)
         
         # Create grid for form elements
@@ -300,6 +224,11 @@ class MQTTConfigDialog(Gtk.Dialog):
         grid.set_row_spacing(10)
         grid.set_column_spacing(10)
         grid.set_border_width(10)
+        
+        # Connection section
+        connection_label = Gtk.Label(label="<b>MQTT Broker Connection</b>")
+        connection_label.set_use_markup(True)
+        connection_label.set_halign(Gtk.Align.START)
         
         # Broker and port
         broker_label = Gtk.Label(label="Broker:")
@@ -313,17 +242,26 @@ class MQTTConfigDialog(Gtk.Dialog):
         self.port_entry = Gtk.SpinButton.new_with_range(1, 65535, 1)
         self.port_entry.set_value(1883)
         
-        # Topic
-        topic_label = Gtk.Label(label="Topic:")
-        topic_label.set_halign(Gtk.Align.END)
-        self.topic_entry = Gtk.Entry()
-        if is_publisher:
-            self.topic_entry.set_text("terminator/output")
-        else:
-            self.topic_entry.set_text("terminator/input")
-        self.topic_entry.set_hexpand(True)
+        # Topics section
+        topics_label = Gtk.Label(label="<b>MQTT Topics</b>")
+        topics_label.set_use_markup(True)
+        topics_label.set_halign(Gtk.Align.START)
         
-        # Authentication
+        # Publishing topic
+        pub_topic_label = Gtk.Label(label="Publishing topic:")
+        pub_topic_label.set_halign(Gtk.Align.END)
+        self.pub_topic_entry = Gtk.Entry()
+        self.pub_topic_entry.set_text("terminator/output")
+        self.pub_topic_entry.set_hexpand(True)
+        
+        # Subscription topic
+        sub_topic_label = Gtk.Label(label="Subscription topic:")
+        sub_topic_label.set_halign(Gtk.Align.END)
+        self.sub_topic_entry = Gtk.Entry()
+        self.sub_topic_entry.set_text("terminator/input")
+        self.sub_topic_entry.set_hexpand(True)
+        
+        # Authentication section
         auth_label = Gtk.Label(label="<b>Authentication (optional)</b>")
         auth_label.set_use_markup(True)
         auth_label.set_halign(Gtk.Align.START)
@@ -338,22 +276,39 @@ class MQTTConfigDialog(Gtk.Dialog):
         self.password_entry.set_visibility(False)
         self.password_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
         
-        # Add widgets to grid
-        grid.attach(broker_label, 0, 0, 1, 1)
-        grid.attach(self.broker_entry, 1, 0, 1, 1)
-        grid.attach(port_label, 2, 0, 1, 1)
-        grid.attach(self.port_entry, 3, 0, 1, 1)
+        # Help text
+        help_label = Gtk.Label()
+        help_text = "• Publishing topic receives output from the terminal\n"
+        help_text += "• Subscription topic sends commands to the terminal\n"
+        help_text += "• Use mosquitto_pub/mosquitto_sub to test the connection"
+        help_label.set_text(help_text)
+        help_label.set_halign(Gtk.Align.START)
         
-        grid.attach(topic_label, 0, 1, 1, 1)
-        grid.attach(self.topic_entry, 1, 1, 3, 1)
+        # Add widgets to grid (row, column, width, height)
+        grid.attach(connection_label, 0, 0, 4, 1)
         
-        grid.attach(auth_label, 0, 3, 4, 1)
+        grid.attach(broker_label, 0, 1, 1, 1)
+        grid.attach(self.broker_entry, 1, 1, 1, 1)
+        grid.attach(port_label, 2, 1, 1, 1)
+        grid.attach(self.port_entry, 3, 1, 1, 1)
         
-        grid.attach(username_label, 0, 4, 1, 1)
-        grid.attach(self.username_entry, 1, 4, 3, 1)
+        grid.attach(topics_label, 0, 3, 4, 1)
         
-        grid.attach(password_label, 0, 5, 1, 1)
-        grid.attach(self.password_entry, 1, 5, 3, 1)
+        grid.attach(pub_topic_label, 0, 4, 1, 1)
+        grid.attach(self.pub_topic_entry, 1, 4, 3, 1)
+        
+        grid.attach(sub_topic_label, 0, 5, 1, 1)
+        grid.attach(self.sub_topic_entry, 1, 5, 3, 1)
+        
+        grid.attach(auth_label, 0, 7, 4, 1)
+        
+        grid.attach(username_label, 0, 8, 1, 1)
+        grid.attach(self.username_entry, 1, 8, 3, 1)
+        
+        grid.attach(password_label, 0, 9, 1, 1)
+        grid.attach(self.password_entry, 1, 9, 3, 1)
+        
+        grid.attach(help_label, 0, 11, 4, 1)
         
         # Add the grid to the dialog
         content_area = self.get_content_area()
@@ -367,8 +322,11 @@ class MQTTConfigDialog(Gtk.Dialog):
     def get_port(self):
         return int(self.port_entry.get_value())
     
-    def get_topic(self):
-        return self.topic_entry.get_text()
+    def get_pub_topic(self):
+        return self.pub_topic_entry.get_text()
+    
+    def get_sub_topic(self):
+        return self.sub_topic_entry.get_text()
     
     def get_username(self):
         return self.username_entry.get_text()
