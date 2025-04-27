@@ -24,21 +24,27 @@ except ImportError:
 
 AVAILABLE = ['MQTTLogger']
 
-class MQTTLogger(plugin.MenuItem):
-    """ Add MQTT integration to the terminal menu """
-    capabilities = ['terminal_menu']
+class MQTTLogger(plugin.TitlebarButton):
+    """ Add MQTT integration to the terminal titlebar """
+    capabilities = ['titlebar_button']
     mqtt_connections = None
     vte_version = Vte.get_minor_version()
     
     # Словарь для хранения MQTT-соединений по UUID терминала, а не по объекту VTE
     terminal_uuid_connections = None
+    
+    # Словарь для хранения кнопок, связанных с терминалами
+    terminal_buttons = None
 
     def __init__(self):
-        plugin.MenuItem.__init__(self)
+        plugin.TitlebarButton.__init__(self)
+        
         if not self.mqtt_connections:
             self.mqtt_connections = {}
         if not self.terminal_uuid_connections:
             self.terminal_uuid_connections = {}
+        if not self.terminal_buttons:
+            self.terminal_buttons = {}
         
         # Отложенное подключение к терминалам, чтобы избежать ошибок инициализации
         GLib.idle_add(self.connect_to_terminals)
@@ -52,19 +58,82 @@ class MQTTLogger(plugin.MenuItem):
         except Exception as e:
             err(f"Couldn't connect to terminals: {str(e)}")
         return False  # Только одно выполнение
-
-    def callback(self, menuitems, menu, terminal):
-        """ Add menu items to the terminal menu """
+    
+    def get_button(self, terminal):
+        """Создает и возвращает кнопку для панели заголовка терминала"""
+        button = Gtk.Button()
+        image = Gtk.Image()
+        
+        # Проверяем наличие UUID у терминала
+        # Если uuid еще не инициализирован, создаем кнопку в отключенном состоянии
+        terminal_uuid = None
+        try:
+            if hasattr(terminal, 'uuid') and terminal.uuid:
+                terminal_uuid = terminal.uuid.urn
+        except:
+            pass
+        
+        connected = False
+        if terminal_uuid:
+            connected = self.is_terminal_connected(terminal_uuid)
+        
+        # Устанавливаем начальное состояние кнопки
         if not MQTT_AVAILABLE:
-            item = Gtk.MenuItem.new_with_mnemonic(_('MQTT Not Available (install python3-paho-mqtt)'))
-            item.set_sensitive(False)
-            menuitems.append(item)
-            return
-
-        # Упрощаем меню - один статический пункт "MQTT Feed"
-        item = Gtk.MenuItem.new_with_mnemonic(_('MQTT Feed'))
-        item.connect("activate", self.configure_or_manage_mqtt, terminal)
-        menuitems.append(item)
+            image.set_from_icon_name('dialog-error-symbolic', Gtk.IconSize.MENU)
+            button.set_tooltip_text(_("MQTT Not Available (install python3-paho-mqtt)"))
+            button.set_sensitive(False)
+        elif connected:
+            # Активное соединение
+            image.set_from_icon_name('network-transmit-receive-symbolic', Gtk.IconSize.MENU)
+            conn_info = self.get_connection_info(terminal_uuid)
+            if conn_info:
+                button.set_tooltip_text(_(f"MQTT Connected: {conn_info['broker']}:{conn_info['port']}"))
+        else:
+            # Нет соединения
+            image.set_from_icon_name('network-offline-symbolic', Gtk.IconSize.MENU)
+            button.set_tooltip_text(_("MQTT: Not Connected"))
+        
+        button.set_image(image)
+        button.set_relief(Gtk.ReliefStyle.NONE)
+        
+        # Привязываем событие клика только если terminal.uuid инициализирован
+        if terminal_uuid:
+            button.connect('clicked', self.on_titlebar_button_clicked, terminal)
+            # Сохраняем ссылку на кнопку для будущего обновления
+            self.terminal_buttons[terminal_uuid] = button
+        else:
+            # Если uuid не инициализирован, подключаем обработчик для последующей инициализации
+            def delayed_connect_handler(widget, event):
+                # Проверяем, инициализирован ли uuid терминала
+                if hasattr(terminal, 'uuid') and terminal.uuid:
+                    terminal_uuid = terminal.uuid.urn
+                    # Отключаем временный обработчик
+                    button.disconnect_by_func(delayed_connect_handler)
+                    # Подключаем настоящий обработчик
+                    button.connect('clicked', self.on_titlebar_button_clicked, terminal)
+                    # Сохраняем ссылку на кнопку
+                    self.terminal_buttons[terminal_uuid] = button
+                    # Обновляем состояние кнопки
+                    self.update_button_state(terminal_uuid, False)
+                    return False
+                return True
+            
+            # Подключаем временный обработчик
+            button.connect('button-press-event', delayed_connect_handler)
+        
+        return button
+    
+    def on_titlebar_button_clicked(self, widget, terminal):
+        """Обработчик нажатия на кнопку MQTT в заголовке"""
+        terminal_uuid = terminal.uuid.urn
+        is_connected = self.is_terminal_connected(terminal_uuid)
+        
+        if is_connected:
+            # Если соединение уже установлено, показываем диалог управления
+            self.show_mqtt_status_dialog(widget.get_toplevel(), terminal)
+        else:
+            # Если соединения нет, запускаем настройку нового соединения
+            self.configure_mqtt(widget, terminal)
         
     def is_terminal_connected(self, terminal_uuid):
         """Проверяет наличие активного MQTT-соединения для данного терминала"""
@@ -122,6 +191,29 @@ class MQTTLogger(plugin.MenuItem):
                     
         except Exception as e:
             sys.stderr.write(f"Error updating terminal connections: {str(e)}\n")
+    
+    def update_button_state(self, terminal_uuid, connected=False, error=False):
+        """Обновляет состояние кнопки MQTT в заголовке"""
+        if terminal_uuid not in self.terminal_buttons:
+            return
+            
+        button = self.terminal_buttons[terminal_uuid]
+        image = button.get_image()
+        
+        if error:
+            # Состояние ошибки
+            image.set_from_icon_name('dialog-error-symbolic', Gtk.IconSize.MENU)
+            button.set_tooltip_text(_("MQTT: Connection Error"))
+        elif connected:
+            # Подключено
+            image.set_from_icon_name('network-transmit-receive-symbolic', Gtk.IconSize.MENU)
+            conn_info = self.get_connection_info(terminal_uuid)
+            if conn_info:
+                button.set_tooltip_text(_(f"MQTT Connected: {conn_info['broker']}:{conn_info['port']}"))
+        else:
+            # Не подключено
+            image.set_from_icon_name('network-offline-symbolic', Gtk.IconSize.MENU)
+            button.set_tooltip_text(_("MQTT: Not Connected"))
 
     def extract_content(self, terminal, row_start, col_start, row_end, col_end):
         """ Extract text content from terminal """
@@ -142,6 +234,12 @@ class MQTTLogger(plugin.MenuItem):
             for term in Terminator().terminals:
                 if term.get_vte() == terminal:
                     terminal_uuid = term.uuid.urn
+                    # Обновляем userdata для MQTT клиента, чтобы всегда была актуальная ссылка на терминал
+                    if terminal_uuid in self.terminal_uuid_connections:
+                        mqtt_client = self.terminal_uuid_connections[terminal_uuid]["mqtt_client"]
+                        # Проверяем, изменились ли userdata
+                        if mqtt_client._userdata.get('terminal') != term:
+                            mqtt_client._userdata = {'terminal': term}
                     break
                     
             if not terminal_uuid or terminal_uuid not in self.terminal_uuid_connections:
@@ -152,6 +250,7 @@ class MQTTLogger(plugin.MenuItem):
             
             # Only continue if we're connected
             if not conn_info["mqtt_client"].is_connected():
+                self.update_button_state(terminal_uuid, False)
                 return
                 
             # Если VTE терминала изменился, обновим его в соединении
@@ -197,11 +296,16 @@ class MQTTLogger(plugin.MenuItem):
                     conn_info["pub_topic"],
                     content[:-1]
                 )
+                # Обновляем состояние кнопки при успешной отправке
+                self.update_button_state(terminal_uuid, True)
                 
             conn_info["col"] = col
             conn_info["row"] = row
         except Exception as e:
             sys.stderr.write(f"MQTT Publisher error: {str(e)}\n")
+            # Обновляем состояние кнопки при ошибке
+            if terminal_uuid:
+                self.update_button_state(terminal_uuid, False, True)
 
     def configure_mqtt(self, _widget, terminal):
         """ Start MQTT connection setup """
@@ -220,12 +324,18 @@ class MQTTLogger(plugin.MenuItem):
                 username = dialog.get_username()
                 password = dialog.get_password()
                 
-                # Используем UUID терминала для создания уникального ID клиента
+                # Используем UUID терминала для создания уникального ID клиента с добавлением timestamp
                 terminal_uuid = terminal.uuid.urn
-                client_id = f"terminator-{terminal_uuid}"
+                import time
+                timestamp = int(time.time())
+                client_id = f"terminator-{terminal_uuid}-{timestamp}"
                 
-                # Create MQTT client
-                mqtt_client = mqtt.Client(client_id=client_id, userdata={'terminal': terminal})
+                dbg(f"Creating MQTT client with ID: {client_id}")
+                
+                # Create MQTT client с включенным clean_session, чтобы избежать получения сохраненных сообщений
+                mqtt_client = mqtt.Client(client_id=client_id, 
+                                         clean_session=True,  # Всегда создавать новую сессию
+                                         userdata={'terminal': terminal})
                 
                 # Set credentials if provided
                 if username:
@@ -233,17 +343,36 @@ class MQTTLogger(plugin.MenuItem):
                 
                 # Set up callbacks
                 mqtt_client.on_message = self.on_mqtt_message
+                mqtt_client.on_connect = self.on_mqtt_connect
+                mqtt_client.on_disconnect = self.on_mqtt_disconnect
+                mqtt_client.on_subscribe = self.on_mqtt_subscribe
+                
+                # Устанавливаем дополнительные MQTT опции для предотвращения дублирования сообщений
+                # Отключаем автоматическую повторную подписку при переподключении
+                mqtt_client.reconnect_delay_set(min_delay=1, max_delay=120)
                 
                 # Connect to broker
-                mqtt_client.connect(broker, port)
+                dbg(f"Connecting to MQTT broker: {broker}:{port}")
+                mqtt_client.connect_async(broker, port)
                 
-                # Subscribe to topic for receiving commands
-                mqtt_client.subscribe(sub_topic)
+                # Start the background thread
+                dbg(f"Starting MQTT loop")
                 mqtt_client.loop_start()
                 
                 # Store connection info in UUID-based словаре
                 vte_terminal = terminal.get_vte()
                 (col, row) = vte_terminal.get_cursor_position()
+                
+                # Отключаем предыдущее соединение, если оно было
+                if terminal_uuid in self.terminal_uuid_connections:
+                    old_client = self.terminal_uuid_connections[terminal_uuid]["mqtt_client"]
+                    try:
+                        dbg(f"Stopping previous MQTT connection for {terminal_uuid}")
+                        old_client.unsubscribe(self.terminal_uuid_connections[terminal_uuid]["sub_topic"])
+                        old_client.loop_stop()
+                        old_client.disconnect()
+                    except:
+                        pass
                 
                 self.terminal_uuid_connections[terminal_uuid] = {
                     "mqtt_client": mqtt_client,
@@ -256,16 +385,27 @@ class MQTTLogger(plugin.MenuItem):
                 }
                 
                 # Connect the contents-changed signal for publishing and store
-                # the handler ID как для VTE, так и для UUID
+                # the handler ID для VTE
                 handler_id = vte_terminal.connect('contents-changed', 
                                            lambda vte: self.mqtt_publish(vte))
                                            
+                # Удаляем предыдущие обработчики для этого VTE, если они были
+                if vte_terminal in self.mqtt_connections:
+                    try:
+                        vte_terminal.disconnect(self.mqtt_connections[vte_terminal]["handler_id"])
+                    except:
+                        pass
+                
                 self.mqtt_connections[vte_terminal] = {
                     "handler_id": handler_id,
                     "terminal_uuid": terminal_uuid
                 }
                 
+                # Обновляем состояние кнопки "ожидание подключения"
+                self.update_button_state(terminal_uuid, False)
+                
             except Exception as e:
+                dbg(f"Error in configure_mqtt: {str(e)}")
                 error = Gtk.MessageDialog(None, Gtk.DialogFlags.MODAL, 
                                          Gtk.MessageType.ERROR,
                                          Gtk.ButtonsType.OK, 
@@ -274,7 +414,64 @@ class MQTTLogger(plugin.MenuItem):
                 error.run()
                 error.destroy()
                 
+                # Обновляем состояние кнопки при ошибке
+                self.update_button_state(terminal_uuid, False, True)
+                
         dialog.destroy()
+    
+    def on_mqtt_subscribe(self, client, userdata, mid, granted_qos):
+        """Обработчик события успешной подписки на топик"""
+        dbg(f"Successfully subscribed to topic, MID: {mid}, QoS: {granted_qos}")
+        if userdata and 'terminal' in userdata:
+            terminal = userdata['terminal']
+            try:
+                terminal_uuid = terminal.uuid.urn
+                if terminal_uuid in self.terminal_uuid_connections:
+                    # Подписка успешна, обновляем состояние кнопки
+                    GLib.idle_add(lambda: self.update_button_state(terminal_uuid, True))
+            except Exception as e:
+                dbg(f"Error in on_mqtt_subscribe: {str(e)}")
+    
+    def on_mqtt_connect(self, client, userdata, flags, rc):
+        """Обработчик успешного подключения к MQTT брокеру"""
+        dbg(f"MQTT Connect callback with result code: {rc}")
+        if not userdata or 'terminal' not in userdata:
+            dbg("No valid terminal in userdata")
+            return
+            
+        terminal = userdata['terminal']
+        try:
+            terminal_uuid = terminal.uuid.urn
+            dbg(f"Terminal UUID in on_mqtt_connect: {terminal_uuid}")
+            
+            # Обновляем состояние кнопки на активное соединение
+            GLib.idle_add(lambda: self.update_button_state(terminal_uuid, True))
+            
+            # Подписываемся на топик при успешном подключении
+            if terminal_uuid in self.terminal_uuid_connections:
+                sub_topic = self.terminal_uuid_connections[terminal_uuid]["sub_topic"]
+                dbg(f"Subscribing to topic on connect: {sub_topic}")
+                result, mid = client.subscribe(sub_topic)
+                dbg(f"Subscribe result: {result}, Message ID: {mid}")
+        except Exception as e:
+            dbg(f"Error in on_mqtt_connect: {str(e)}")
+    
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        """Обработчик отключения от MQTT брокера"""
+        dbg(f"MQTT Disconnect callback with result code: {rc}")
+        if not userdata or 'terminal' not in userdata:
+            dbg("No valid terminal in userdata")
+            return
+            
+        terminal = userdata['terminal']
+        try:
+            terminal_uuid = terminal.uuid.urn
+            dbg(f"Terminal UUID in on_mqtt_disconnect: {terminal_uuid}")
+            
+            # Обновляем состояние кнопки на отключенное соединение
+            GLib.idle_add(lambda: self.update_button_state(terminal_uuid, False))
+        except Exception as e:
+            dbg(f"Error in on_mqtt_disconnect: {str(e)}")
 
     def stop_mqtt(self, _widget, terminal):
         """ Stop MQTT connection """
@@ -308,14 +505,31 @@ class MQTTLogger(plugin.MenuItem):
             
             # Remove from connections dict
             del self.terminal_uuid_connections[terminal_uuid]
+            
+            # Обновляем состояние кнопки на отключенное соединение
+            self.update_button_state(terminal_uuid, False)
 
     def on_mqtt_message(self, client, userdata, msg):
         """ Callback for received MQTT messages """
-        if not userdata or 'terminal' not in userdata:
+        dbg(f"MQTT message received from topic: {msg.topic}")
+        
+        if not userdata:
+            dbg("MQTT: userdata is None!")
+            return
+            
+        if 'terminal' not in userdata:
+            dbg("MQTT: 'terminal' not in userdata!")
             return
             
         terminal = userdata['terminal']
-        terminal_uuid = terminal.uuid.urn
+        dbg(f"MQTT: terminal from userdata: {terminal}")
+        
+        try:
+            terminal_uuid = terminal.uuid.urn
+            dbg(f"MQTT: terminal UUID: {terminal_uuid}")
+        except Exception as e:
+            dbg(f"MQTT: Error getting UUID from terminal: {str(e)}")
+            return
         
         # Проверяем, существует ли еще терминал в списке терминалов Terminator
         terminal_exists = False
@@ -323,10 +537,12 @@ class MQTTLogger(plugin.MenuItem):
             if term.uuid.urn == terminal_uuid:
                 terminal = term  # Обновляем ссылку на терминал
                 terminal_exists = True
+                dbg(f"MQTT: Found matching terminal in Terminator terminals list")
                 break
         
         if not terminal_exists:
             # Терминал был закрыт, нужно отключить MQTT слушателя
+            dbg(f"MQTT: Terminal no longer exists, disconnecting client")
             try:
                 client.disconnect()
                 client.loop_stop()
@@ -347,6 +563,8 @@ class MQTTLogger(plugin.MenuItem):
                 else:
                     payload = str(msg.payload)
                     
+                dbg(f"MQTT message payload: {payload}")
+                
                 # Проверяем снова здесь, т.к. терминал мог быть закрыт между проверкой выше
                 # и выполнением этого кода
                 terminal_exists = False
@@ -357,6 +575,7 @@ class MQTTLogger(plugin.MenuItem):
                         break
                 
                 if not terminal_exists:
+                    dbg(f"MQTT: Terminal no longer exists in feed_to_terminal")
                     return False
                     
                 # Совершенно удаляем любые завершающие переводы строки из входящего сообщения
@@ -368,13 +587,19 @@ class MQTTLogger(plugin.MenuItem):
                 # Дополнительная проверка перед использованием терминала
                 vte_terminal = terminal.get_vte()
                 if vte_terminal:
+                    dbg(f"MQTT: Feeding message to VTE terminal: {payload}")
                     vte_terminal.feed_child(payload.encode())
+                    dbg(f"MQTT: Message sent to terminal")
+                else:
+                    dbg(f"MQTT: No VTE terminal found")
                 return False  # Don't repeat
             except Exception as e:
                 sys.stderr.write(f"Error feeding MQTT message to terminal: {str(e)}\n")
+                dbg(f"MQTT feed error: {str(e)}")
                 return False
                 
         # Schedule the GUI update in the main thread
+        dbg(f"MQTT: Scheduling feed_to_terminal in GLib.idle_add")
         GLib.idle_add(feed_to_terminal)
 
     def on_terminal_closed(self, terminal):
@@ -410,6 +635,10 @@ class MQTTLogger(plugin.MenuItem):
                 
                 # Remove from connections dict
                 del self.terminal_uuid_connections[terminal_uuid]
+                
+                # Удаляем кнопку из списка
+                if terminal_uuid in self.terminal_buttons:
+                    del self.terminal_buttons[terminal_uuid]
                 
         except Exception as e:
             sys.stderr.write(f"Error cleaning up MQTT on terminal close: {str(e)}\n")
@@ -532,6 +761,16 @@ class MQTTLogger(plugin.MenuItem):
             self.stop_mqtt(None, terminal)
         
         dialog.destroy()
+
+    def update_mqtt_userdata(self, terminal_uuid, terminal):
+        """Обновляет ссылку на терминал в userdata для MQTT клиента"""
+        if terminal_uuid in self.terminal_uuid_connections:
+            mqtt_client = self.terminal_uuid_connections[terminal_uuid]["mqtt_client"]
+            if mqtt_client._userdata.get('terminal') != terminal:
+                dbg(f"Updating MQTT userdata for terminal {terminal_uuid}")
+                mqtt_client._userdata = {'terminal': terminal}
+                return True
+        return False
 
 
 class MQTTConfigDialog(Gtk.Dialog):

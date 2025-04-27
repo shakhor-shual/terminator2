@@ -298,8 +298,34 @@ class Terminal(Gtk.VBox):
         return(terminalbox)
 
     def load_plugins(self, force = False):
+        """Загрузка плагинов и обновление заголовка"""
         registry = plugin.PluginRegistry()
         registry.load_plugins(force)
+        # После загрузки плагинов, обновляем заголовок, чтобы отобразить кнопки от плагинов
+        if hasattr(self, 'titlebar') and self.titlebar:
+            # Заменяем существующий заголовок на новый
+            old_titlebar = self.titlebar
+            self.titlebar = Titlebar(self)
+            self.titlebar.connect_icon(self.on_group_button_press)
+            self.titlebar.connect('edit-done', self.on_edit_done)
+            self.connect('title-change', self.titlebar.set_terminal_title)
+            self.titlebar.connect('create-group', self.really_create_group)
+            self.titlebar.update('window-focus-out')
+            
+            # Заменяем старый заголовок на новый в родительском контейнере
+            if self.config['title_at_bottom']:
+                # Заголовок внизу
+                old_position = 1
+            else:
+                # Заголовок вверху
+                old_position = 0
+            
+            parent = old_titlebar.get_parent()
+            if parent:
+                parent.remove(old_titlebar)
+                parent.pack_start(self.titlebar, False, True, 0)
+                parent.reorder_child(self.titlebar, old_position)
+                self.titlebar.show_all()
 
     def _add_regex(self, name, re):
         dbg(f"adding regex: {re}")
@@ -1633,9 +1659,33 @@ class Terminal(Gtk.VBox):
 
         self.titlebar.update()
 
+        # После полной инициализации терминала перезапускаем load_plugins
+        # чтобы гарантировать правильное отображение кнопок плагинов
+        GObject.timeout_add(500, self.delayed_load_plugins)
+
         if self.pid == -1:
             self.vte.feed(_('Unable to start shell:') + shell)
             return -1
+            
+    def delayed_load_plugins(self):
+        """Загрузить плагины с задержкой после инициализации терминала"""
+        dbg('Delayed loading plugins for terminal UUID: %s' % self.uuid.urn)
+        self.load_plugins(force = True)
+        
+        # Если есть активные MQTT соединения, обновим в них ссылки на текущий терминал
+        try:
+            from terminatorlib.plugins.mqttlogger import MQTTLogger
+            for plugin_instance in plugin.PluginRegistry().instances:
+                if isinstance(plugin_instance, MQTTLogger):
+                    # Используем специальный метод для обновления userdata
+                    if hasattr(plugin_instance, 'update_mqtt_userdata'):
+                        if plugin_instance.update_mqtt_userdata(self.uuid.urn, self):
+                            dbg('Updated MQTT terminal reference for terminal UUID: %s' % self.uuid.urn)
+                    break
+        except Exception as e:
+            dbg('Error updating MQTT terminal references: %s' % str(e))
+            
+        return False
 
     def prepare_url(self, urlmatch):
         """Prepare a URL from a VTE match"""

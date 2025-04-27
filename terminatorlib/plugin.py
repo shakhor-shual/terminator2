@@ -30,6 +30,7 @@ from .config import Config
 from .util import dbg, err, get_config_dir
 from .terminator import Terminator
 
+# pylint: disable-msg=R0904
 class Plugin(object):
     """Definition of our base plugin class"""
     capabilities = None
@@ -197,6 +198,23 @@ class MenuItem(Plugin):
     def callback(self, menuitems, menu, terminal):
         """Callback to transform the enclosed URL"""
         raise NotImplementedError
+
+# TitlebarButton - This adds buttons to the titlebar of terminals
+class TitlebarButton(Plugin):
+    """Base class for titlebar button plugins"""
+    capabilities = ['titlebar_button']
+    
+    def __init__(self):
+        """Class initialiser"""
+        Plugin.__init__(self)
+        
+    def get_button(self, terminal):
+        """Return a Gtk.Button object to be placed in the titlebar"""
+        raise NotImplementedError
+    
+    def unload(self):
+        """Handle being removed"""
+        pass
 
 
 """

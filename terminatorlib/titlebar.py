@@ -45,11 +45,24 @@ class Titlebar(Gtk.EventBox):
         self.terminal = terminal
         self.config = self.terminal.config
 
+        # Уменьшаем отступы и размер шрифта для более компактного заголовка
+        self.set_border_width(0)  # Уменьшаем внешние отступы
+        
         self.label = EditableLabel()
         self.label.connect('edit-done', self.on_edit_done)
+        self.label.set_margin_top(0)    # Уменьшаем внутренние отступы
+        self.label.set_margin_bottom(0)
+        
         self.ebox = Gtk.EventBox()
         grouphbox = Gtk.HBox()
+        
+        # Настройка размеров элементов группы
+        grouphbox.set_spacing(1)  # Уменьшаем расстояние между элементами
+        
         self.grouplabel = Gtk.Label(ellipsize='end')
+        self.grouplabel.set_margin_top(0)
+        self.grouplabel.set_margin_bottom(0)
+        
         self.groupicon = Gtk.Image()
         self.bellicon = Gtk.Image()
         self.bellicon.set_no_show_all(True)
@@ -59,6 +72,11 @@ class Titlebar(Gtk.EventBox):
         self.groupentry.connect('focus-out-event', self.groupentry_cancel)
         self.groupentry.connect('activate', self.groupentry_activate)
         self.groupentry.connect('key-press-event', self.groupentry_keypress)
+        
+        # Уменьшаем высоту поля ввода
+        css = Gtk.CssProvider()
+        css.load_from_data(b"entry { min-height: 0px; padding-top: 0px; padding-bottom: 0px; }")
+        self.groupentry.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         groupsend_type = self.terminator.groupsend_type
         if self.terminator.groupsend == groupsend_type['all']:
@@ -70,9 +88,9 @@ class Titlebar(Gtk.EventBox):
         self.set_from_icon_name('_active_broadcast_%s' % icon_name, 
                 Gtk.IconSize.MENU)
 
-        grouphbox.pack_start(self.groupicon, False, True, 2)
-        grouphbox.pack_start(self.grouplabel, False, True, 2)
-        grouphbox.pack_start(self.groupentry, False, True, 2)
+        grouphbox.pack_start(self.groupicon, False, True, 0)
+        grouphbox.pack_start(self.grouplabel, False, True, 0)
+        grouphbox.pack_start(self.groupentry, False, True, 0)
 
         self.ebox.add(grouphbox)
         self.ebox.show_all()
@@ -81,14 +99,54 @@ class Titlebar(Gtk.EventBox):
 
         viewport = Gtk.Viewport(hscroll_policy='natural')
         viewport.add(self.label)
+        viewport.set_margin_top(0)    # Уменьшаем отступы у контейнера
+        viewport.set_margin_bottom(0)
 
         hbox = Gtk.HBox()
+        hbox.set_spacing(1)  # Уменьшаем расстояние между элементами
         hbox.pack_start(self.ebox, False, True, 0)
-        hbox.pack_start(Gtk.VSeparator(), False, True, 0)
+        
+        separator = Gtk.VSeparator()
+        separator.set_margin_top(2)    # Делаем сепаратор немного меньше
+        separator.set_margin_bottom(2)
+        
+        hbox.pack_start(separator, False, True, 0)
         hbox.pack_start(viewport, True, True, 0)
-        hbox.pack_end(self.bellicon, False, False, 2)
+        hbox.pack_end(self.bellicon, False, False, 0)
+        
+        # Добавляем поддержку кнопок от плагинов с уменьшенными отступами
+        self.plugin_buttons = {}
+        try:
+            from terminatorlib.plugin import PluginRegistry
+            registry = PluginRegistry()
+            registry.load_plugins()
+            plugins = registry.get_plugins_by_capability('titlebar_button')
+            for button_plugin in plugins:
+                try:
+                    dbg('Получаем кнопку от плагина: %s' % button_plugin.__class__.__name__)
+                    button = button_plugin.get_button(terminal)
+                    if button:
+                        # Уменьшаем размер кнопок от плагинов
+                        button.set_relief(Gtk.ReliefStyle.NONE)  # Убираем рамку для более компактного вида
+                        css = Gtk.CssProvider()
+                        css.load_from_data(b"button { min-height: 0px; padding: 0px 2px; }")
+                        button.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+                        
+                        self.plugin_buttons[button_plugin.__class__.__name__] = button
+                        hbox.pack_end(button, False, False, 0)
+                        button.show_all()
+                except Exception as plugin_ex:
+                    dbg('Ошибка при добавлении кнопки %s: %s' % (button_plugin.__class__.__name__, plugin_ex))
+        except Exception as ex:
+            dbg('Ошибка при загрузке кнопок для заголовка: %s' % ex)
 
         self.add(hbox)
+        
+        # Добавляем CSS для всего заголовка, чтобы уменьшить его высоту
+        css = Gtk.CssProvider()
+        css.load_from_data(b"box { min-height: 0px; }")
+        self.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        
         hbox.show_all()
         self.set_no_show_all(True)
         self.show()
