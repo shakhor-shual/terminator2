@@ -12,6 +12,8 @@ import time
 from gi.repository import Gtk, Gdk, GLib, Vte
 import terminatorlib.plugin as plugin
 from terminatorlib.translation import _
+from terminatorlib.util import dbg, err
+from terminatorlib.terminator import Terminator
 
 # Import the MQTT client library
 try:
@@ -32,6 +34,19 @@ class MQTTLogger(plugin.MenuItem):
         plugin.MenuItem.__init__(self)
         if not self.mqtt_connections:
             self.mqtt_connections = {}
+        
+        # Отложенное подключение к терминалам, чтобы избежать ошибок инициализации
+        GLib.idle_add(self.connect_to_terminals)
+    
+    def connect_to_terminals(self):
+        """Подключение к существующим терминалам после инициализации"""
+        try:
+            terminator = Terminator()
+            for terminal in terminator.terminals:
+                terminal.connect('close-term', self.on_terminal_closed)
+        except Exception as e:
+            err(f"Couldn't connect to terminals: {str(e)}")
+        return False  # Только одно выполнение
 
     def callback(self, menuitems, menu, terminal):
         """ Add menu items to the terminal menu """
@@ -98,6 +113,9 @@ class MQTTLogger(plugin.MenuItem):
 
     def configure_mqtt(self, _widget, terminal):
         """ Start MQTT connection setup """
+        # Подключаем обработчик закрытия для нового терминала
+        terminal.connect('close-term', self.on_terminal_closed)
+        
         dialog = MQTTConfigDialog(_widget.get_toplevel(), _("MQTT Configuration"))
         response = dialog.run()
         
@@ -180,6 +198,17 @@ class MQTTLogger(plugin.MenuItem):
             
         terminal = userdata['terminal']
         
+        # Проверяем, существует ли еще терминал в списке терминалов Terminator
+        if terminal not in Terminator().terminals:
+            # Терминал был закрыт, нужно отключить MQTT слушателя
+            try:
+                client.disconnect()
+                client.loop_stop()
+                dbg('MQTT client disconnected because terminal was closed')
+            except Exception as e:
+                sys.stderr.write(f"Error disconnecting MQTT client: {str(e)}\n")
+            return
+        
         # We need to schedule the feed in the main GTK thread
         def feed_to_terminal():
             try:
@@ -188,15 +217,21 @@ class MQTTLogger(plugin.MenuItem):
                 else:
                     payload = str(msg.payload)
                     
+                # Проверяем снова здесь, т.к. терминал мог быть закрыт между проверкой выше
+                # и выполнением этого кода
+                if terminal not in Terminator().terminals:
+                    return False
+                    
                 # Совершенно удаляем любые завершающие переводы строки из входящего сообщения
                 payload = payload.rstrip('\r\n')
                 
                 # А теперь добавляем ОДИН перевод строки для выполнения команды
                 payload += '\n'
                 
-                # Используем feed_child на объекте VTE терминала для эмуляции ввода клавиатуры
+                # Дополнительная проверка перед использованием терминала
                 vte_terminal = terminal.get_vte()
-                vte_terminal.feed_child(payload.encode())
+                if vte_terminal:
+                    vte_terminal.feed_child(payload.encode())
                 return False  # Don't repeat
             except Exception as e:
                 sys.stderr.write(f"Error feeding MQTT message to terminal: {str(e)}\n")
@@ -205,6 +240,27 @@ class MQTTLogger(plugin.MenuItem):
         # Schedule the GUI update in the main thread
         GLib.idle_add(feed_to_terminal)
 
+    def on_terminal_closed(self, terminal):
+        """Обработчик закрытия терминала - отключаем связанные MQTT соединения"""
+        try:
+            vte_terminal = terminal.get_vte()
+            if vte_terminal in self.mqtt_connections:
+                dbg(f"Terminal closed, stopping MQTT connections for {terminal}")
+                # Отключаем сигнал, если он еще существует
+                try:
+                    vte_terminal.disconnect(self.mqtt_connections[vte_terminal]["handler_id"])
+                except:
+                    pass  # Сигнал может быть уже отключен
+                
+                # Останавливаем MQTT клиент
+                self.mqtt_connections[vte_terminal]["mqtt_client"].loop_stop()
+                self.mqtt_connections[vte_terminal]["mqtt_client"].disconnect()
+                
+                # Удаляем из mqtt_connections
+                del self.mqtt_connections[vte_terminal]
+        except Exception as e:
+            sys.stderr.write(f"Error cleaning up MQTT on terminal close: {str(e)}\n")
+            
 
 class MQTTConfigDialog(Gtk.Dialog):
     """ Dialog for configuring MQTT connection """
