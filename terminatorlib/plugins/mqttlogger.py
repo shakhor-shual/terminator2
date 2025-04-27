@@ -79,18 +79,18 @@ class MQTTLogger(plugin.TitlebarButton):
         
         # Устанавливаем начальное состояние кнопки
         if not MQTT_AVAILABLE:
-            image.set_from_icon_name('dialog-error-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('dialog-error', Gtk.IconSize.MENU)
             button.set_tooltip_text(_("MQTT Not Available (install python3-paho-mqtt)"))
             button.set_sensitive(False)
         elif connected:
             # Активное соединение
-            image.set_from_icon_name('network-transmit-receive-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('network-transmit-receive', Gtk.IconSize.MENU)
             conn_info = self.get_connection_info(terminal_uuid)
             if conn_info:
                 button.set_tooltip_text(_(f"MQTT Connected: {conn_info['broker']}:{conn_info['port']}"))
         else:
             # Нет соединения
-            image.set_from_icon_name('network-offline-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('network-offline', Gtk.IconSize.MENU)
             button.set_tooltip_text(_("MQTT: Not Connected"))
         
         button.set_image(image)
@@ -202,17 +202,17 @@ class MQTTLogger(plugin.TitlebarButton):
         
         if error:
             # Состояние ошибки
-            image.set_from_icon_name('dialog-error-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('dialog-error', Gtk.IconSize.MENU)
             button.set_tooltip_text(_("MQTT: Connection Error"))
         elif connected:
             # Подключено
-            image.set_from_icon_name('network-transmit-receive-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('network-transmit-receive', Gtk.IconSize.MENU)
             conn_info = self.get_connection_info(terminal_uuid)
             if conn_info:
                 button.set_tooltip_text(_(f"MQTT Connected: {conn_info['broker']}:{conn_info['port']}"))
         else:
             # Не подключено
-            image.set_from_icon_name('network-offline-symbolic', Gtk.IconSize.MENU)
+            image.set_from_icon_name('network-offline', Gtk.IconSize.MENU)
             button.set_tooltip_text(_("MQTT: Not Connected"))
 
     def extract_content(self, terminal, row_start, col_start, row_end, col_end):
@@ -416,9 +416,13 @@ class MQTTLogger(plugin.TitlebarButton):
                 
                 # Обновляем состояние кнопки при ошибке
                 self.update_button_state(terminal_uuid, False, True)
-                
+        
+        # Закрываем диалог
         dialog.destroy()
-    
+        
+        # Восстанавливаем фокус терминала после закрытия диалогового окна
+        self.focus_related_terminal(terminal)
+
     def on_mqtt_subscribe(self, client, userdata, mid, granted_qos):
         """Обработчик события успешной подписки на топик"""
         dbg(f"Successfully subscribed to topic, MID: {mid}, QoS: {granted_qos}")
@@ -761,6 +765,9 @@ class MQTTLogger(plugin.TitlebarButton):
             self.stop_mqtt(None, terminal)
         
         dialog.destroy()
+        
+        # Восстанавливаем фокус терминала после закрытия диалога
+        self.focus_related_terminal(terminal)
 
     def update_mqtt_userdata(self, terminal_uuid, terminal):
         """Обновляет ссылку на терминал в userdata для MQTT клиента"""
@@ -770,6 +777,17 @@ class MQTTLogger(plugin.TitlebarButton):
                 dbg(f"Updating MQTT userdata for terminal {terminal_uuid}")
                 mqtt_client._userdata = {'terminal': terminal}
                 return True
+        return False
+
+    def focus_related_terminal(self, terminal):
+        """Восстанавливает фокус на терминале после закрытия диалогового окна"""
+        if terminal:
+            dbg(f"Restoring focus to terminal: {terminal.uuid.urn}")
+            # Искусственно генерируем событие получения фокуса
+            GLib.idle_add(lambda: terminal.on_vte_focus_in(terminal.vte, None))
+            # Устанавливаем фокус на VTE
+            terminal.grab_focus()
+            return True
         return False
 
 

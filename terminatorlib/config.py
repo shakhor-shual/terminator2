@@ -262,7 +262,7 @@ DEFAULTS = {
                 # Titlebar
                 'title_hide_sizetext'     : False,
                 'title_transmit_fg_color' : '#ffffff',
-                'title_transmit_bg_color' : '#c80003',
+                'title_transmit_bg_color' : '#4a95f5',
                 'title_receive_fg_color'  : '#ffffff',
                 'title_receive_bg_color'  : '#0076c9',
                 'title_inactive_fg_color' : '#000000',

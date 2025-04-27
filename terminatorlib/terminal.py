@@ -1672,6 +1672,13 @@ class Terminal(Gtk.VBox):
         dbg('Delayed loading plugins for terminal UUID: %s' % self.uuid.urn)
         self.load_plugins(force = True)
         
+        # После инициализации искусственно генерируем события фокуса для правильного обновления цветов заголовка
+        def force_focus_update():
+            self.on_vte_focus_in(self.vte, None)
+            return False
+        
+        GObject.timeout_add(10, force_focus_update)  # Уменьшаем задержку с 100мс до 10мс
+        
         # Если есть активные MQTT соединения, обновим в них ссылки на текущий терминал
         try:
             from terminatorlib.plugins.mqttlogger import MQTTLogger
