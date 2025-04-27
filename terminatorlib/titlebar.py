@@ -52,7 +52,11 @@ class Titlebar(Gtk.EventBox):
         self.label.connect('edit-done', self.on_edit_done)
         self.label.set_margin_top(0)    # Уменьшаем внутренние отступы
         self.label.set_margin_bottom(0)
+        self.label.set_no_show_all(True)  # Скрываем по умолчанию
+        self.label.hide()  # Скрываем надпись
         
+        # Создаем элементы для группировки, но не показываем их в заголовке
+        # (для совместимости с функциями группировки)
         self.ebox = Gtk.EventBox()
         grouphbox = Gtk.HBox()
         
@@ -93,28 +97,64 @@ class Titlebar(Gtk.EventBox):
         grouphbox.pack_start(self.groupentry, False, True, 0)
 
         self.ebox.add(grouphbox)
-        self.ebox.show_all()
-
+        self.ebox.set_no_show_all(True)  # Скрываем элемент группы
+        self.ebox.hide()                 # Скрываем элемент группы
+        
         self.bellicon.set_from_icon_name('terminal-bell', Gtk.IconSize.MENU)
 
-        viewport = Gtk.Viewport(hscroll_policy='natural')
-        viewport.add(self.label)
-        viewport.set_margin_top(0)    # Уменьшаем отступы у контейнера
-        viewport.set_margin_bottom(0)
-
+        # Создаем основной контейнер
         hbox = Gtk.HBox()
         hbox.set_spacing(1)  # Уменьшаем расстояние между элементами
-        hbox.pack_start(self.ebox, False, True, 0)
         
-        separator = Gtk.VSeparator()
-        separator.set_margin_top(2)    # Делаем сепаратор немного меньше
-        separator.set_margin_bottom(2)
+        # Левая часть заголовка (встроенные функции)
+        left_box = Gtk.HBox()
+        left_box.set_spacing(1)
         
-        hbox.pack_start(separator, False, True, 0)
-        hbox.pack_start(viewport, True, True, 0)
-        hbox.pack_end(self.bellicon, False, False, 0)
+        # Правая часть заголовка (плагины и индикаторы)
+        right_box = Gtk.HBox()
+        right_box.set_spacing(1)
         
-        # Добавляем поддержку кнопок от плагинов с уменьшенными отступами
+        # Добавляем элементы в левую часть
+        # НЕ добавляем self.ebox в left_box, так как мы хотим скрыть его
+        
+        # Создаем универсальную кнопку масштабирования (максимизация/восстановление)
+        self.zoom_button = Gtk.Button()
+        self.zoom_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.zoom_icon = Gtk.Image()
+        
+        # Устанавливаем начальное состояние (по умолчанию - максимизация)
+        self.update_zoom_button_state(False)
+        
+        # Привязываем обработчик нажатия
+        self.zoom_button.connect('clicked', self.on_zoom_button_clicked)
+        
+        # Применяем CSS для компактного вида
+        zoom_css = Gtk.CssProvider()
+        zoom_css.load_from_data(b"button { min-height: 0px; padding: 0px 2px; }")
+        self.zoom_button.get_style_context().add_provider(zoom_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        
+        # Создаем кнопку для сплита авто
+        split_button = Gtk.Button()
+        split_button.set_relief(Gtk.ReliefStyle.NONE)
+        split_icon = Gtk.Image()
+        split_icon.set_from_icon_name('view-grid-symbolic', Gtk.IconSize.MENU)
+        split_button.set_image(split_icon)
+        split_button.set_tooltip_text(_('Split terminal automatically'))
+        split_button.connect('clicked', lambda w: self.terminal.key_split_auto())
+        
+        # Применяем CSS для компактного вида
+        split_css = Gtk.CssProvider()
+        split_css.load_from_data(b"button { min-height: 0px; padding: 0px 2px; }")
+        split_button.get_style_context().add_provider(split_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        
+        # Добавляем кнопки в левую часть заголовка
+        left_box.pack_start(self.zoom_button, False, False, 0)
+        left_box.pack_start(split_button, False, False, 0)
+        
+        # Добавляем индикатор звонка в правую часть
+        right_box.pack_start(self.bellicon, False, False, 0)
+        
+        # Загружаем кнопки плагинов в правую часть
         self.plugin_buttons = {}
         try:
             from terminatorlib.plugin import PluginRegistry
@@ -133,13 +173,25 @@ class Titlebar(Gtk.EventBox):
                         button.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
                         
                         self.plugin_buttons[button_plugin.__class__.__name__] = button
-                        hbox.pack_end(button, False, False, 0)
+                        right_box.pack_end(button, False, False, 0)
                         button.show_all()
                 except Exception as plugin_ex:
                     dbg('Ошибка при добавлении кнопки %s: %s' % (button_plugin.__class__.__name__, plugin_ex))
         except Exception as ex:
             dbg('Ошибка при загрузке кнопок для заголовка: %s' % ex)
-
+        
+        # Собираем левую и правую части в основной контейнер
+        hbox.pack_start(left_box, False, True, 0)
+        hbox.pack_end(right_box, False, True, 0)
+        
+        # Добавляем скрытый viewport с текстом в середину (не будет отображаться)
+        viewport = Gtk.Viewport(hscroll_policy='natural')
+        viewport.add(self.label)
+        viewport.set_margin_top(0)
+        viewport.set_margin_bottom(0)
+        viewport.set_no_show_all(True)
+        viewport.hide()
+        
         self.add(hbox)
         
         # Добавляем CSS для всего заголовка, чтобы уменьшить его высоту
@@ -152,6 +204,83 @@ class Titlebar(Gtk.EventBox):
         self.show()
 
         self.connect('button-press-event', self.on_clicked)
+        
+        # Подключаем обработчик изменения состояния терминала
+        self.terminal.connect('unzoom', lambda w: self.update_zoom_button_state(False))
+        self.terminal.connect('zoom', lambda w: self.update_zoom_button_state(True))
+        self.terminal.connect('maximise', lambda w: self.update_zoom_button_state(True))
+        
+        # Обновляем начальное состояние кнопки после создания всех виджетов
+        GObject.idle_add(self.update_button_sensitivity)
+        
+        # Вместо подписки на события создания и удаления терминалов,
+        # которые не реализованы через систему сигналов,
+        # добавляем периодическую проверку состояния
+        GObject.timeout_add(1000, self.check_terminal_count)
+    
+    def update_zoom_button_state(self, is_zoomed):
+        """Обновляет состояние и внешний вид кнопки масштабирования"""
+        if is_zoomed:
+            # Терминал увеличен - показываем кнопку восстановления
+            self.zoom_icon.set_from_icon_name('view-restore-symbolic', Gtk.IconSize.MENU)
+            self.zoom_button.set_tooltip_text(_('Restore all terminals'))
+        else:
+            # Терминал в обычном состоянии - показываем кнопку максимизации
+            self.zoom_icon.set_from_icon_name('view-fullscreen-symbolic', Gtk.IconSize.MENU)
+            self.zoom_button.set_tooltip_text(_('Maximize terminal'))
+        
+        self.zoom_button.set_image(self.zoom_icon)
+        
+        # После обновления иконки проверяем, нужно ли деактивировать кнопку
+        self.update_button_sensitivity()
+    
+    def update_button_sensitivity(self):
+        """Обновляет активность кнопки масштабирования в зависимости от количества терминалов"""
+        # Получаем список всех терминалов в окне
+        from terminatorlib.window import Window
+        
+        is_zoom_button_sensitive = False
+        
+        try:
+            # Проходим по родительским объектам, чтобы найти Window
+            parent = self.terminal.get_parent()
+            while parent:
+                if isinstance(parent, Window):
+                    # Если нашли окно, получаем все терминалы из него
+                    terminals = parent.get_terminals()
+                    is_zoom_button_sensitive = len(terminals) > 1
+                    break
+                parent = parent.get_parent()
+                
+            # Если терминал в состоянии максимизации, кнопка всегда активна (для восстановления)
+            if self.terminal.is_zoomed():
+                is_zoom_button_sensitive = True
+        except Exception as e:
+            # Если что-то пошло не так, выводим отладочную информацию
+            from terminatorlib.util import dbg
+            dbg(f"Ошибка при обновлении состояния кнопки масштабирования: {str(e)}")
+            # По умолчанию делаем кнопку активной, чтобы избежать блокировки функциональности
+            is_zoom_button_sensitive = True
+            
+        # Применяем состояние активности к кнопке
+        self.zoom_button.set_sensitive(is_zoom_button_sensitive)
+    
+    def on_zoom_button_clicked(self, widget):
+        """Обработчик нажатия на кнопку масштабирования"""
+        # Проверяем текущее состояние терминала
+        if self.terminal.is_zoomed():
+            # Если увеличен - восстанавливаем нормальный размер
+            dbg('Restoring all terminals')
+            self.terminal.unzoom()
+            self.update_zoom_button_state(False)
+        else:
+            # Если нормальный размер - увеличиваем
+            dbg('Maximizing terminal')
+            self.terminal.key_toggle_zoom()
+            self.update_zoom_button_state(True)
+        
+        # После изменения состояния проверяем активность кнопки
+        self.update_button_sensitivity()
 
     def connect_icon(self, func):
         """Connect the supplied function to clicking on the group icon"""
@@ -365,5 +494,11 @@ class Titlebar(Gtk.EventBox):
         """Set a custom string"""
         self.label.set_text(string)
         self.label.set_custom()
+
+    def check_terminal_count(self):
+        """Периодически проверяет количество терминалов и обновляет состояние кнопки"""
+        self.update_button_sensitivity()
+        # Возвращаем True, чтобы продолжить периодические вызовы
+        return True
 
 GObject.type_register(Titlebar)
